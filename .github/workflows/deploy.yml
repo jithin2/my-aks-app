@@ -1,0 +1,66 @@
+name: Build and Deploy to AKS
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Login to ACR
+      run: az acr login --name ${{ secrets.ACR_NAME }}
+    
+    - name: Build and push image
+      run: |
+        docker build -t ${{ secrets.ACR_NAME }}.azurecr.io/my-app:${{ github.sha }} .
+        docker push ${{ secrets.ACR_NAME }}.azurecr.io/my-app:${{ github.sha }}
+        docker tag ${{ secrets.ACR_NAME }}.azurecr.io/my-app:${{ github.sha }} ${{ secrets.ACR_NAME }}.azurecr.io/my-app:latest
+        docker push ${{ secrets.ACR_NAME }}.azurecr.io/my-app:latest
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Get AKS credentials
+      run: |
+        az aks get-credentials --resource-group ${{ secrets.RESOURCE_GROUP }} --name ${{ secrets.CLUSTER_NAME }}
+    
+    - name: Update tenant ID in SecretProviderClass
+      run: |
+        TENANT_ID=$(az account show --query tenantId --output tsv)
+        sed -i "s/YOUR_TENANT_ID/$TENANT_ID/g" k8s/secretproviderclass.yaml
+    
+    - name: Deploy to AKS
+      run: |
+        kubectl apply -f k8s/namespace.yaml
+        kubectl apply -f k8s/secretproviderclass.yaml
+        kubectl apply -f k8s/deployment.yaml
+        kubectl apply -f k8s/service.yaml
+    
+    - name: Wait for deployment
+      run: |
+        kubectl wait --for=condition=available --timeout=300s deployment/my-app -n my-app
+    
+    - name: Get service info
+      run: |
+        kubectl get service my-app-service -n my-app
